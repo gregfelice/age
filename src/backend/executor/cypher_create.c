@@ -146,6 +146,31 @@ static void begin_cypher_create(CustomScanState *node, EState *estate,
     }
 
     Increment_Estate_CommandId(estate);
+
+    /*
+     * Guarantee that this clause writes, whatever the plan shape.
+     *
+     * The CREATE lives in a CustomScan inside the plan tree, so the planner
+     * is free to put it on either side of a join, and the executor is free to
+     * skip an input it can prove contributes nothing -- a hash join with an
+     * empty build side skips its outer relation, a merge join stops when one
+     * input is exhausted. When the skipped input is the one holding this
+     * node, the writes never happen at all and the statement silently does
+     * nothing (issue #2494).
+     *
+     * es_auxmodifytables is how PostgreSQL solves the same problem for
+     * data-modifying CTEs: ExecPostprocessPlan() runs everything on that list
+     * to completion once the main plan is done, precisely so that writes do
+     * not depend on the main query pulling from them. Registering here gets
+     * the same guarantee. Re-running an already-exhausted node is a no-op --
+     * its subtree returns NULL immediately.
+     *
+     * EXPLAIN without ANALYZE never reaches ExecutorFinish, so skip it there.
+     */
+    if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+    {
+        estate->es_auxmodifytables = lappend(estate->es_auxmodifytables, node);
+    }
 }
 
 /*
